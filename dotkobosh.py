@@ -8,6 +8,7 @@ from textual.app import ComposeResult, App
 from textual.widget import Widget
 from textual.color import Gradient
 from textual.reactive import reactive
+from textual.widgets import Log
 from textual.message import Message
 import random
 import os
@@ -15,6 +16,8 @@ import zipfile
 from rich.console import Console
 from Crypto.Cipher import AES
 import base64
+import json
+import io
 
 
 # CustomSliderWidget for encryption intensity selection using ProgressBar
@@ -24,7 +27,7 @@ class CustomSliderWidget(Widget):
     def on_mount(self):
         self.focus()
 
-    def __init__(self, on_submit=None, minimum=3, maximum=10, value=5):
+    def __init__(self, on_submit=None, minimum=3, maximum=15, value=5):
         super().__init__()
         self.on_submit = on_submit
         self.minimum = minimum
@@ -410,22 +413,115 @@ class KoboshTextualApp(App):
         # Create subdirectory with hash name
         hash_dir = os.path.join(tmp_dir, hash_name)
         self.dir = hash_dir
-        self.file = path
+        self.file = str(path).split("\\")[-1].split("/")[-1]
+        self.metadata = {"original.name":self.file, "sha256": hash_name}
         if not os.path.exists(hash_dir):
             os.makedirs(hash_dir)
         self.notify(f"Encrypt file: {path}\nCreated directory: {hash_dir}")
 
         self.intensity_slider = CustomSliderWidget(
-            on_submit=self.handle_intensity_submit, minimum=3, maximum=10, value=5
+            on_submit=self.handle_intensity_submit, minimum=3, maximum=15, value=5
         )
         self.mount(self.intensity_slider)
 
         # Show intensity slider
 
     def handle_intensity_submit(self, intensity):
-        self.notify(f"Selected encryption intensity: {intensity}")
-        self.notify(f"Processing file {self.file} with tmp dir {self.dir}")
+        # Create a Log widget to display log messages
+        self.log_widget = Log(id="encryption-log", highlight=True)
+        self.mount(self.log_widget)
+        self.log_widget.write(f"Selected encryption intensity: {intensity}" + "\n")
+        self.log_widget.write(f"Processing file {self.file} with tmp dir {self.dir}" + "\n")
+        # Split the original file into 'intensity' chunks of the same size
+        file_size = os.path.getsize(self.file)
+        chunk_size = file_size // intensity
+        remainder = file_size % intensity
+        chunks = []
+        with open(self.file, "rb") as f:
+            for i in range(intensity):
+                size = chunk_size + (1 if i < remainder else 0)
+                chunk = f.read(size)
+                chunk_path = os.path.join(self.dir, f"chunk_{i+1:02d}")
+                with open(chunk_path, "wb") as cf:
+                    cf.write(chunk)
+                chunks.append(chunk_path)
+        new_chunks = []
+        chunkhashes = []
+        for chunk in chunks:
+            with open(chunk,"rb") as f:
+                sha256hash = sha256(f)
+                root, ext = os.path.split(str(chunk))
+                os.rename(chunk,os.path.join(root,sha256hash[:12]))
+                self.log_widget.write(f"Renamed {chunk} to {sha256hash}" + "\n")
+                new_chunks.append(os.path.join(root,sha256hash[:12]))
+                chunkhashes.append(sha256hash)
+        chunks = new_chunks.copy()
+        self.log_widget.write(f"Split file into {intensity} chunks:" + "\n")
+        for chunk in chunks:
+            self.log_widget.write(chunk + "\n")
+        self.metadata["chunks"] = chunkhashes
+        self.log_widget.write(str(self.metadata) + "\n")
+        self.log_widget.write("Encrypting chunks" + "\n")
+        keys = []
+        for chunk in chunks:
+            with open(chunk, "rb") as f:
+                data = f.read()
+                key = self.new256bitKey()
+                cipher = AES.new(key, AES.MODE_EAX)
+                ciphertext = cipher.encrypt(data)
+                encrypted_chunk_path = chunk+".enc"
+                with open(encrypted_chunk_path, "wb") as ef:
+                    ef.write(cipher.nonce + ciphertext)
+                keys.append(base64.b85encode(key).decode())
+                self.log_widget.write(f"Encrypted {chunk} to {encrypted_chunk_path}" + "\n")
+        self.metadata["keys"] = keys
+        self.log_widget.write("Encryption complete!" + "\n")
+        self.log_widget.write("Metadata: " + json.dumps(self.metadata, indent=2) + "\n")
+        # Create a zip file with the encrypted chunks and metadata
+        zip_path = os.path.join(self.dir, f"{self.file}.kobosh")
+        json_metadata = base64.b85encode(json.dumps(self.metadata).encode()).decode()
+        bit128key = self.new128bitKey()
+        cipher = AES.new(bit128key, AES.MODE_EAX)
+        encrypted_metadata = cipher.encrypt(json_metadata.encode())
+        with zipfile.ZipFile(zip_path, "w") as zipf:
+            for chunk in chunks:
+                zipf.write(chunk + ".enc", arcname=os.path.basename(chunk) + ".enc")
+            metadata_path = os.path.join(self.dir, "metadata.json")
+            with open(metadata_path, "wb") as mf:
+                mf.write(cipher.nonce + encrypted_metadata)
+            zipf.write(metadata_path, arcname="metadata.json")
+        # Move .kobosh file to main directory
+        main_dir = os.getcwd()
+        final_path = os.path.join(main_dir, f"{self.file}.kobosh")
+        os.rename(zip_path, final_path)
+        self.log_widget.write(f"Moved .kobosh file to: {final_path}" + "\n")
+        # Remove temp folder
+        import shutil
+        shutil.rmtree(self.dir)
+        self.log_widget.write(f"Removed temp folder: {self.dir}" + "\n")
+
+        # Generate key phrase for decrypting metadata
+        # b32 encode the key, then map each char to a word in wordlist
+        sha256key = sha256(io.BytesIO(bit128key))
+        key_b32 = base64.b32encode(bit128key).decode()
+        sha256key_b32 = base64.b32encode(sha256key.encode()).decode()
+        key_b32+=sha256key_b32[:2]
+        key_phrase = []
+        for char in key_b32:
+            if char == "=": continue
+            idx = b32alphabet.index(char)
+            key_phrase.append(wordlist[idx])
+        phrase_str = " ".join(key_phrase)
+        self.log_widget.write(f"Key phrase to decrypt metadata:\n{phrase_str}\n")
         
+        
+    def new256bitKey(self):
+        # Generate a random 32-byte (256-bit) key
+        return os.urandom(32)
+
+    def new128bitKey(self):
+        # Generate a random 16-byte (128-bit) key
+        return os.urandom(16)
 
     def handle_key_submit(self, value):
         self.notify(f"Mode: {self.selected_mode}, Submitted value: {value}")
