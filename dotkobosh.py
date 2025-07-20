@@ -7,10 +7,7 @@ from textual import events
 from textual.app import ComposeResult, App
 from textual.widget import Widget
 from textual.color import Gradient
-from textual.reactive import reactive
 from textual.widgets import Log
-from textual.message import Message
-import random
 import os
 import zipfile
 from rich.console import Console
@@ -18,7 +15,8 @@ from Crypto.Cipher import AES
 import base64
 import json
 import io
-
+import hashlib
+import shutil
 
 # CustomSliderWidget for encryption intensity selection using ProgressBar
 class CustomSliderWidget(Widget):
@@ -317,8 +315,6 @@ class KoboshTextualApp(App):
 
 
 def sha256(stream):
-    import hashlib
-
     sha256 = hashlib.sha256()
     for chunk in iter(lambda: stream.read(4096), b""):
         sha256.update(chunk)
@@ -401,8 +397,6 @@ class KoboshTextualApp(App):
         yield self.menu
 
     def handle_file_submit(self, path):
-        import os
-
         # Ensure tmp directory exists
         tmp_dir = os.path.join(os.getcwd(), "tmp")
         if not os.path.exists(tmp_dir):
@@ -496,7 +490,6 @@ class KoboshTextualApp(App):
         os.rename(zip_path, final_path)
         self.log_widget.write(f"Moved .kobosh file to: {final_path}" + "\n")
         # Remove temp folder
-        import shutil
         shutil.rmtree(self.dir)
         self.log_widget.write(f"Removed temp folder: {self.dir}" + "\n")
 
