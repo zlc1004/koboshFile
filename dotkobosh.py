@@ -4,19 +4,77 @@ from textual.widgets import Button, Static
 from textual.widgets import ProgressBar, Button, Static, Input, DirectoryTree
 from textual.containers import Center, Vertical, Horizontal
 from textual import events
-from textual.app import ComposeResult, App
+from textual.app import ComposeResult, App, Binding, SystemCommand
 from textual.widget import Widget
 from textual.color import Gradient
 from textual.widgets import Log
 import os
 import zipfile
-from rich.console import Console
 from Crypto.Cipher import AES
 import base64
 import json
 import io
 import hashlib
 import shutil
+from textual.widgets import Footer
+from textual.screen import Screen
+from typing import Iterable
+
+
+# --- KoboshPhrase ---
+class KoboshPhrase:
+    wordlist = "kobosh joei emo gluttonous tender juicy chewable edible tasty reporter turth kobosher gyat brown orange black mia indian kimchi gas chamber telegram paradox gyatman massive low taper fade koboshian crowbar connavon skibidi".lower().split(
+        " "
+    )
+    b32alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"
+
+    @classmethod
+    def from_phrase(cls, phrase: str):
+        words = phrase.strip().split()
+        if len(words) < 3:
+            return None, "Key phrase too short."
+        try:
+            chars = [
+                cls.b32alphabet[cls.wordlist.index(w)]
+                for w in words
+                if w in cls.wordlist
+            ]
+        except ValueError:
+            return None, "Invalid word in key phrase."
+        key_b32 = "".join(chars)
+        key_b32_nopad = key_b32.replace("=", "")
+        key_part = key_b32_nopad[:-2]
+        checksum = key_b32_nopad[-2:]
+        try:
+            key_bytes = base64.b32decode(key_part + "=" * ((8 - len(key_part) % 8) % 8))
+        except Exception:
+            return None, "Key phrase could not be decoded."
+        sha256key = sha256(io.BytesIO(key_bytes))
+        sha256key_b32 = base64.b32encode(sha256key.encode()).decode()
+        expected_checksum = sha256key_b32[:2]
+        if checksum != expected_checksum:
+            return None, "Key phrase is INVALID."
+        return key_bytes, None
+
+    @classmethod
+    def to_phrase(cls, key_bytes: bytes):
+        sha256key = sha256(io.BytesIO(key_bytes))
+        key_b32 = base64.b32encode(key_bytes).decode()
+        sha256key_b32 = base64.b32encode(sha256key.encode()).decode()
+        key_b32 += sha256key_b32[:2]
+        key_phrase = []
+        for char in key_b32:
+            if char == "=":
+                continue
+            idx = cls.b32alphabet.index(char)
+            key_phrase.append(cls.wordlist[idx])
+        return " ".join(key_phrase)
+
+    @classmethod
+    def is_valid(cls, phrase: str):
+        key_bytes, err = cls.from_phrase(phrase)
+        return err is None
+
 
 # CustomSliderWidget for encryption intensity selection using ProgressBar
 class CustomSliderWidget(Widget):
@@ -83,11 +141,6 @@ class CustomSliderWidget(Widget):
         # ...existing code...
 
 
-wordlist = "kobosh joei emo gluttonous tender juicy chewable edible tasty reporter turth kobosher gyat brown orange black mia indian kimchi gas chamber telegram paradox gyatman massive low taper fade koboshian crowbar connavon skibidi".lower().split(
-    " "
-)
-b32alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"
-
 # --- Textual App Implementation ---
 
 
@@ -116,7 +169,9 @@ class SuggestionInputWidget(Widget):
         words = self.input_text.strip().split()
         fragment = words[-1] if words else ""
         filtered = (
-            [w for w in wordlist if w.startswith(fragment)] if fragment else wordlist
+            [w for w in KoboshPhrase.wordlist if w.startswith(fragment)]
+            if fragment
+            else KoboshPhrase.wordlist
         )
         filtered = sorted(filtered)
         self.suggestions = filtered[:8]
@@ -222,6 +277,7 @@ class ChoiceMenu(Widget):
         yield Center(
             Vertical(
                 Static("Choose an action:", id="menu-title"),
+                Static("Use ctrl + p to open the command palette", id="menu-instructions"),
                 Horizontal(
                     Button("Encrypt", id="encrypt"),
                     Button("Decrypt", id="decrypt"),
@@ -297,8 +353,17 @@ class KoboshTextualApp(App):
         margin-right: 2;
     }
     """
+    BINDINGS = [
+        Binding(key="^q", action="quit", description="Quit the app"),
+        Binding(key="^c", action="copy_phrase", description="Copy key phrase after encrypt",show=True),
+    ]
+    
+    def get_system_commands(self, screen: Screen) -> Iterable[SystemCommand]:
+        yield from super().get_system_commands(screen)  
+        yield SystemCommand("Copy Your KoboshPhrase", "Copy your KoboshPhrase (only available in encrypt mode)", self.action_copy_phrase)  
 
     def compose(self) -> ComposeResult:
+        yield Footer()
         def handle_choice(mode):
             self.selected_mode = mode
             if mode == "decrypt":
@@ -408,7 +473,7 @@ class KoboshTextualApp(App):
         hash_dir = os.path.join(tmp_dir, hash_name)
         self.dir = hash_dir
         self.file = str(path).split("\\")[-1].split("/")[-1]
-        self.metadata = {"original.name":self.file, "sha256": hash_name}
+        self.metadata = {"original.name": self.file, "sha256": hash_name}
         if not os.path.exists(hash_dir):
             os.makedirs(hash_dir)
         self.notify(f"Encrypt file: {path}\nCreated directory: {hash_dir}")
@@ -421,11 +486,14 @@ class KoboshTextualApp(App):
         # Show intensity slider
 
     def handle_intensity_submit(self, intensity):
+        self.last_phrase_str = None
         # Create a Log widget to display log messages
         self.log_widget = Log(id="encryption-log", highlight=True)
         self.mount(self.log_widget)
         self.log_widget.write(f"Selected encryption intensity: {intensity}" + "\n")
-        self.log_widget.write(f"Processing file {self.file} with tmp dir {self.dir}" + "\n")
+        self.log_widget.write(
+            f"Processing file {self.file} with tmp dir {self.dir}" + "\n"
+        )
         # Split the original file into 'intensity' chunks of the same size
         file_size = os.path.getsize(self.file)
         chunk_size = file_size // intensity
@@ -442,12 +510,12 @@ class KoboshTextualApp(App):
         new_chunks = []
         chunkhashes = []
         for chunk in chunks:
-            with open(chunk,"rb") as f:
+            with open(chunk, "rb") as f:
                 sha256hash = sha256(f)
                 root, ext = os.path.split(str(chunk))
-                os.rename(chunk,os.path.join(root,sha256hash[:12]))
+                os.rename(chunk, os.path.join(root, sha256hash[:12]))
                 self.log_widget.write(f"Renamed {chunk} to {sha256hash}" + "\n")
-                new_chunks.append(os.path.join(root,sha256hash[:12]))
+                new_chunks.append(os.path.join(root, sha256hash[:12]))
                 chunkhashes.append(sha256hash)
         chunks = new_chunks.copy()
         self.log_widget.write(f"Split file into {intensity} chunks:" + "\n")
@@ -463,11 +531,13 @@ class KoboshTextualApp(App):
                 key = self.new256bitKey()
                 cipher = AES.new(key, AES.MODE_EAX)
                 ciphertext = cipher.encrypt(data)
-                encrypted_chunk_path = chunk+".enc"
+                encrypted_chunk_path = chunk + ".enc"
                 with open(encrypted_chunk_path, "wb") as ef:
                     ef.write(cipher.nonce + ciphertext)
                 keys.append(base64.b85encode(key).decode())
-                self.log_widget.write(f"Encrypted {chunk} to {encrypted_chunk_path}" + "\n")
+                self.log_widget.write(
+                    f"Encrypted {chunk} to {encrypted_chunk_path}" + "\n"
+                )
         self.metadata["keys"] = keys
         self.log_widget.write("Encryption complete!" + "\n")
         self.log_widget.write("Metadata: " + json.dumps(self.metadata, indent=2) + "\n")
@@ -493,21 +563,19 @@ class KoboshTextualApp(App):
         shutil.rmtree(self.dir)
         self.log_widget.write(f"Removed temp folder: {self.dir}" + "\n")
 
-        # Generate key phrase for decrypting metadata
-        # b32 encode the key, then map each char to a word in wordlist
-        sha256key = sha256(io.BytesIO(bit128key))
-        key_b32 = base64.b32encode(bit128key).decode()
-        sha256key_b32 = base64.b32encode(sha256key.encode()).decode()
-        key_b32+=sha256key_b32[:2]
-        key_phrase = []
-        for char in key_b32:
-            if char == "=": continue
-            idx = b32alphabet.index(char)
-            key_phrase.append(wordlist[idx])
-        phrase_str = " ".join(key_phrase)
+        # Generate key phrase for decrypting metadata using KoboshPhrase
+        phrase_str = KoboshPhrase.to_phrase(bit128key)
+        self.last_phrase_str = phrase_str
         self.log_widget.write(f"Key phrase to decrypt metadata:\n{phrase_str}\n")
-        
-        
+    def action_copy_phrase(self):
+        # Only allow if phrase_str is available
+        if hasattr(self, "last_phrase_str") and self.last_phrase_str:
+            import pyperclip
+            pyperclip.copy(self.last_phrase_str)
+            self.notify(f"Key phrase copied to clipboard!\n{self.last_phrase_str}")
+        else:
+            self.notify("No key phrase available. Encrypt a file first.")
+
     def new256bitKey(self):
         # Generate a random 32-byte (256-bit) key
         return os.urandom(32)
@@ -517,7 +585,103 @@ class KoboshTextualApp(App):
         return os.urandom(16)
 
     def handle_key_submit(self, value):
-        self.notify(f"Mode: {self.selected_mode}, Submitted value: {value}")
+        key_bytes, err = KoboshPhrase.from_phrase(value)
+        if err:
+            self.notify(err)
+            return
+        self.notify("Key phrase is valid! Select a .kobosh file to decrypt.")
+        self.kobosh_browser = FileBrowserWidget(
+            on_submit=self.handle_kobosh_file_submit, root_path=os.getcwd()
+        )
+        self.mount(self.kobosh_browser)
+        self.decryption_key_bytes = key_bytes
+
+    def handle_kobosh_file_submit(self, path):
+        # Only accept .kobosh files
+        if not str(path).endswith(".kobosh"):
+            self.notify("Please select a .kobosh file.")
+            return
+        # Create a Log widget for decryption
+        self.log_widget = Log(id="encryption-log", highlight=True)
+        self.mount(self.log_widget)
+        # Extract zip to temp dir
+        tmp_dir = os.path.join(os.getcwd(), "tmp_decrypt")
+        if os.path.exists(tmp_dir):
+            shutil.rmtree(tmp_dir)
+        os.makedirs(tmp_dir)
+        with zipfile.ZipFile(path, "r") as zipf:
+            zipf.extractall(tmp_dir)
+        self.log_widget.write(f"Extracted {path} to {tmp_dir}\n")
+        # Find metadata.json
+        metadata_path = os.path.join(tmp_dir, "metadata.json")
+        if not os.path.exists(metadata_path):
+            self.log_widget.write("metadata.json not found in archive.\n")
+            return
+        # Decrypt metadata
+        with open(metadata_path, "rb") as mf:
+            nonce = mf.read(16)
+            encrypted_metadata = mf.read()
+        cipher = AES.new(self.decryption_key_bytes, AES.MODE_EAX, nonce=nonce)
+        try:
+            json_metadata = cipher.decrypt(encrypted_metadata)
+            metadata = json.loads(base64.b85decode(json_metadata).decode())
+        except Exception:
+            self.log_widget.write("Failed to decrypt metadata.\n")
+            return
+        self.log_widget.write(f"Decrypted metadata: {json.dumps(metadata, indent=2)}\n")
+        # Decrypt chunks
+        chunk_hashes = metadata["chunks"]
+        chunk_keys = metadata["keys"]
+        original_name = metadata["original.name"]
+        decrypted_chunks = []
+        for i, chunk_hash in enumerate(chunk_hashes):
+            enc_chunk_path = os.path.join(tmp_dir, chunk_hash[:12] + ".enc")
+            if not os.path.exists(enc_chunk_path):
+                self.log_widget.write(f"Encrypted chunk {enc_chunk_path} not found.\n")
+                return
+            with open(enc_chunk_path, "rb") as ef:
+                nonce = ef.read(16)
+                ciphertext = ef.read()
+            key = base64.b85decode(chunk_keys[i])
+            cipher = AES.new(key, AES.MODE_EAX, nonce=nonce)
+            try:
+                chunk_data = cipher.decrypt(ciphertext)
+            except Exception:
+                self.log_widget.write(f"Failed to decrypt chunk {i+1}.\n")
+                return
+            # Verify chunk hash
+            chunk_hash_actual = sha256(io.BytesIO(chunk_data))
+            if chunk_hash_actual != chunk_hash:
+                self.log_widget.write(
+                    f"Chunk {i+1} hash mismatch! Expected {chunk_hash}, got {chunk_hash_actual}\n"
+                )
+                return
+            chunk_out_path = os.path.join(tmp_dir, f"chunk_{i+1:02d}.dec")
+            with open(chunk_out_path, "wb") as cf:
+                cf.write(chunk_data)
+            decrypted_chunks.append(chunk_out_path)
+            self.log_widget.write(f"Decrypted and verified chunk {i+1}\n")
+        # Combine chunks
+        output_path = os.path.join(tmp_dir, original_name)
+        with open(output_path, "wb") as outf:
+            for chunk_path in decrypted_chunks:
+                with open(chunk_path, "rb") as cf:
+                    outf.write(cf.read())
+        # Verify final file hash
+        with open(output_path, "rb") as outf:
+            final_hash = sha256(outf)
+        if final_hash != metadata["sha256"]:
+            self.log_widget.write(
+                f"Final file hash mismatch! Expected {metadata['sha256']}, got {final_hash}\n"
+            )
+            return
+        # Move file to main dir
+        final_path = os.path.join(os.getcwd(), original_name)
+        shutil.move(output_path, final_path)
+        self.log_widget.write(f"Decryption complete! File saved as {final_path}\n")
+        # Remove temp folder
+        shutil.rmtree(tmp_dir)
+        self.log_widget.write(f"Removed temp folder: {tmp_dir}\n")
 
 
 # --- FileBrowserWidget ---
@@ -544,6 +708,76 @@ class FileBrowserWidget(Widget):
     def on_mount(self):
         tree = self.query_one(DirectoryTree)
         tree.focus()
+
+    def handle_intensity_submit(self, intensity):
+        self.log_widget = Log(id="encryption-log", highlight=True)
+        self.mount(self.log_widget)
+        self.log_widget.write(f"Selected encryption intensity: {intensity}\n")
+        self.log_widget.write(f"Processing file {self.file} with tmp dir {self.dir}\n")
+        file_size = os.path.getsize(self.file)
+        chunk_size = file_size // intensity
+        remainder = file_size % intensity
+        chunks = []
+        with open(self.file, "rb") as f:
+            for i in range(intensity):
+                size = chunk_size + (1 if i < remainder else 0)
+                chunk = f.read(size)
+                chunk_path = os.path.join(self.dir, f"chunk_{i+1:02d}")
+                with open(chunk_path, "wb") as cf:
+                    cf.write(chunk)
+                chunks.append(chunk_path)
+        new_chunks = []
+        chunkhashes = []
+        for chunk in chunks:
+            with open(chunk, "rb") as f:
+                sha256hash = sha256(f)
+                root, ext = os.path.split(str(chunk))
+                os.rename(chunk, os.path.join(root, sha256hash[:12]))
+                self.log_widget.write(f"Renamed {chunk} to {sha256hash}\n")
+                new_chunks.append(os.path.join(root, sha256hash[:12]))
+                chunkhashes.append(sha256hash)
+        chunks = new_chunks.copy()
+        self.log_widget.write(f"Split file into {intensity} chunks:\n")
+        for chunk in chunks:
+            self.log_widget.write(chunk + "\n")
+        self.metadata["chunks"] = chunkhashes
+        self.log_widget.write(str(self.metadata) + "\n")
+        self.log_widget.write("Encrypting chunks\n")
+        keys = []
+        for chunk in chunks:
+            with open(chunk, "rb") as f:
+                data = f.read()
+                key = self.new256bitKey()
+                cipher = AES.new(key, AES.MODE_EAX)
+                ciphertext = cipher.encrypt(data)
+                encrypted_chunk_path = chunk + ".enc"
+                with open(encrypted_chunk_path, "wb") as ef:
+                    ef.write(cipher.nonce + ciphertext)
+                keys.append(base64.b85encode(key).decode())
+                self.log_widget.write(f"Encrypted {chunk} to {encrypted_chunk_path}\n")
+        self.metadata["keys"] = keys
+        self.log_widget.write("Encryption complete!\n")
+        self.log_widget.write("Metadata: " + json.dumps(self.metadata, indent=2) + "\n")
+        zip_path = os.path.join(self.dir, f"{self.file}.kobosh")
+        json_metadata = base64.b85encode(json.dumps(self.metadata).encode()).decode()
+        bit128key = self.new128bitKey()
+        cipher = AES.new(bit128key, AES.MODE_EAX)
+        encrypted_metadata = cipher.encrypt(json_metadata.encode())
+        with zipfile.ZipFile(zip_path, "w") as zipf:
+            for chunk in chunks:
+                zipf.write(chunk + ".enc", arcname=os.path.basename(chunk) + ".enc")
+            metadata_path = os.path.join(self.dir, "metadata.json")
+            with open(metadata_path, "wb") as mf:
+                mf.write(cipher.nonce + encrypted_metadata)
+            zipf.write(metadata_path, arcname="metadata.json")
+        main_dir = os.getcwd()
+        final_path = os.path.join(main_dir, f"{self.file}.kobosh")
+        os.rename(zip_path, final_path)
+        self.log_widget.write(f"Moved .kobosh file to: {final_path}\n")
+        shutil.rmtree(self.dir)
+        self.log_widget.write(f"Removed temp folder: {self.dir}\n")
+        phrase_str = KoboshPhrase.to_phrase(bit128key)
+        self.log_widget.write(f"Key phrase to decrypt metadata:\n{phrase_str}\n")
 
     def on_directory_tree_file_selected(self, event):
         path = event.path
