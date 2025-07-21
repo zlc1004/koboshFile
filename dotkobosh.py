@@ -512,11 +512,11 @@ class KoboshTextualApp(App):
         for chunk in chunks:
             with open(chunk, "rb") as f:
                 sha256hash = sha256(f)
-                root, ext = os.path.split(str(chunk))
-                os.rename(chunk, os.path.join(root, sha256hash[:12]))
-                self.log_widget.write(f"Renamed {chunk} to {sha256hash}" + "\n")
-                new_chunks.append(os.path.join(root, sha256hash[:12]))
-                chunkhashes.append(sha256hash)
+            root, ext = os.path.split(str(chunk))
+            os.rename(chunk, os.path.join(root, sha256hash[:12]))
+            self.log_widget.write(f"Renamed {chunk} to {sha256hash}" + "\n")
+            new_chunks.append(os.path.join(root, sha256hash[:12]))
+            chunkhashes.append(sha256hash)
         chunks = new_chunks.copy()
         self.log_widget.write(f"Split file into {intensity} chunks:" + "\n")
         for chunk in chunks:
@@ -731,11 +731,11 @@ class FileBrowserWidget(Widget):
         for chunk in chunks:
             with open(chunk, "rb") as f:
                 sha256hash = sha256(f)
-                root, ext = os.path.split(str(chunk))
-                os.rename(chunk, os.path.join(root, sha256hash[:12]))
-                self.log_widget.write(f"Renamed {chunk} to {sha256hash}\n")
-                new_chunks.append(os.path.join(root, sha256hash[:12]))
-                chunkhashes.append(sha256hash)
+            root, ext = os.path.split(str(chunk))
+            os.rename(chunk, os.path.join(root, sha256hash[:12]))
+            self.log_widget.write(f"Renamed {chunk} to {sha256hash}\n")
+            new_chunks.append(os.path.join(root, sha256hash[:12]))
+            chunkhashes.append(sha256hash)
         chunks = new_chunks.copy()
         self.log_widget.write(f"Split file into {intensity} chunks:\n")
         for chunk in chunks:
